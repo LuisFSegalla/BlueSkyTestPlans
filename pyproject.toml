@@ -15,7 +15,7 @@ description = "Bluesky plans and scripts"
 dependencies = [
     "bluesky",
     "ophyd",
-    "ophyd_async @ git+https://github.com/bluesky/ophyd-async@1020-pmac-with-gaps",
+    "ophyd_async @ git+https://github.com/bluesky/ophyd-async@1033-number-of-points-to-scan-on-the-pmac-is-wrong",
     "pandas",
     "matplotlib",
     "databroker",
