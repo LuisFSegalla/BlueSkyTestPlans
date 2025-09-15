@@ -32,7 +32,7 @@ from ophyd_async.plan_stubs import ensure_connected
 
 # get_beamline_name with no arguments to get the
 # default BL name (from $BEAMLINE)
-BL = get_beamline_name()
+BL = get_beamline_name("p99")
 PREFIX = BeamlinePrefix(BL)
 
 
@@ -86,6 +86,7 @@ def no_panda():
 
     yield from inner_plan()
 
+
 def panda_scan(start: float, stop: float, num: int, duration: float):
     p = panda()
     motor_x = Motor(prefix="BL99P-MO-STAGE-02:X", name="Motor_X")
@@ -102,7 +103,7 @@ def panda_scan(start: float, stop: float, num: int, duration: float):
     # Prepare motor info using trajectory scanning
     spec = Fly(
         float(duration)
-        @ (Line(motor_y, start, stop, num) * ~Line(motor_x, start, stop, num))
+        @ (Line(motor_y, start, stop, num) * Line(motor_x, start, stop, num))
     )
 
     trigger_logic = spec
@@ -112,27 +113,32 @@ def panda_scan(start: float, stop: float, num: int, duration: float):
     motor_x_mres = -2e-05
 
     table = SeqTable()
-    positions = [int(x / motor_x_mres) for x in spec.frames().midpoints[motor_x]]
+    positions = [int(x / motor_x_mres) for x in spec.frames().lower[motor_x]]
 
-    direction = SeqTrigger.POSA_LT if start * motor_x_mres > stop * motor_x_mres else SeqTrigger.POSA_GT
+    direction = (
+        SeqTrigger.POSA_LT
+        if start * motor_x_mres > stop * motor_x_mres
+        else SeqTrigger.POSA_GT
+    )
 
     counter = 0
     for pos in positions:
-        # As we do multiple swipes it's necessary to change the comparison
-        # for triggering the sequencer table.
-        # This is not the best way of doing it but will sufice for now
         if counter == num:
-            if direction == SeqTrigger.POSA_GT:
-                direction = SeqTrigger.POSA_LT
-            else:
-                direction = SeqTrigger.POSA_GT
+            table += SeqTable.row(
+                repeats=1,
+                trigger=SeqTrigger.BITA_0,
+            )
+            table += SeqTable.row(
+                repeats=1,
+                trigger=SeqTrigger.BITA_1,
+            )
             counter = 0
 
         table += SeqTable.row(
             repeats=1,
             trigger=direction,
             position=pos,
-            time1=1,  # int(int(duration / 1e-6) - 100),
+            time1=1,
             outa1=True,
             time2=1,
             outa2=False,
