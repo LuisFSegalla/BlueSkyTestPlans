@@ -15,7 +15,7 @@ description = "Bluesky plans and scripts"
 dependencies = [
     "bluesky",
     "ophyd",
-    "ophyd_async",
+    "ophyd_async @ git+https://github.com/bluesky/ophyd-async@448_create_time_based_PandA_Flyer",
     "pandas",
     "matplotlib",
     "databroker",
