@@ -22,7 +22,8 @@ dependencies = [
     "scipy",
     "dls-dodal",
     "typer",
-    "ipython"
+    "ipython",
+    "h5py"
 ]
 dynamic = ["version"]
 license.file = "LICENSE"
