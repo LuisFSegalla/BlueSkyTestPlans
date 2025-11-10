@@ -226,8 +226,13 @@ def array_scan(start: float, stop: float, num: int, duration: float):
     yield from ensure_connected(pmac, motor_x, motor_y, p)
     panda_seq = StandardFlyer(StaticSeqTableTriggerLogic(p.seq[1]))
 
-    low = np.append(np.linspace(-2, 0, 100), np.linspace(1, 6, 100))
-    diff = np.append(np.repeat(low[1] - low[0], 10), np.repeat(low[-1] - low[-2], 100))
+    low = np.append(
+        np.linspace(-4, -2, 100),
+        np.append(np.repeat(0, 50), np.linspace(1, 6, 100))
+    )
+    diff = np.append(np.repeat(low[1] - low[0], 100),
+                    np.append(np.repeat(0, 50), np.repeat(low[-1] - low[-2], 100))
+    )
     up = low + diff
 
     # Prepare motor info using trajectory scanning
