@@ -22,10 +22,7 @@ from scanspec.specs import Array, Fly, Line
 
 from ophyd_async.core import DetectorTrigger, StandardFlyer, TriggerInfo, wait_for_value
 from ophyd_async.epics.motor import Motor
-from ophyd_async.epics.pmac import (
-    PmacIO,
-    PmacTrajectoryTriggerLogic,
-)
+from ophyd_async.epics.pmac import PmacIO, PmacScanInfo, PmacTrajectoryTriggerLogic
 from ophyd_async.fastcs.panda import (
     HDFPanda,
     PandaPcompDirection,
@@ -44,7 +41,7 @@ from ophyd_async.plan_stubs import ensure_connected
 
 # get_beamline_name with no arguments to get the
 # default BL name (from $BEAMLINE)
-BL = get_beamline_name("p99")
+BL = get_beamline_name("P51")
 PREFIX = BeamlinePrefix(BL)
 
 
@@ -74,7 +71,7 @@ class _StaticPcompTriggerLogic(StaticPcompTriggerLogic):
 @device_factory()
 def panda() -> HDFPanda:
     return HDFPanda(
-        f"{PREFIX.beamline_prefix}-MO-PANDA-01:",
+        "BL51P-EA-PANDA-02:",
         path_provider=get_path_provider(),
         name="panda",
     )
@@ -83,7 +80,7 @@ def panda() -> HDFPanda:
 set_path_provider(
     StaticVisitPathProvider(
         BL,
-        Path("/dls/p99/data/2025/cm40656-5/"),
+        Path("/dls/p51/data/2026/cm44254-1"),
         client=LocalDirectoryServiceClient(),
     )
 )
@@ -124,17 +121,60 @@ def no_panda():
     yield from inner_plan()
 
 
-def panda_scan(start: float, stop: float, num: int, duration: float):
+def panda_capture(
+        start: float,
+        stop: float,
+        num: int,
+        duration: float,
+        repetitions: int = 1,
+        ramp_time: float | None = None,
+        turnaround_time: float | None = None,
+    ):
     p = panda()
-    motor_x = Motor(prefix="BL99P-MO-STAGE-02:X", name="Motor_X")
-    motor_y = Motor(prefix="BL99P-MO-STAGE-02:Y", name="Motor_Y")
+    motor_x = Motor(prefix="BL51P-OP-PCHRO-01:TS:XFINE", name="Motor_X")
     pmac = PmacIO(
-        prefix="BL99P-MO-STEP-01:",
-        raw_motors=[motor_y, motor_x],
-        coord_nums=[1],
+        prefix="BL51P-MO-STEP-06:",
+        raw_motors=[motor_x],
+        coord_nums=[3],
         name="pmac",
     )
-    yield from ensure_connected(pmac, motor_x, motor_y, p)
+    yield from ensure_connected(pmac, motor_x, p)
+
+    # Prepare motor info using trajectory scanning
+    spec = Fly(duration @ (repetitions * ~Line(motor_x, start, stop, num)))
+
+    trigger_logic = PmacScanInfo(
+        spec=spec,
+        ramp_time=ramp_time,
+        turnaround_time=turnaround_time
+    )
+    pmac_trajectory = PmacTrajectoryTriggerLogic(pmac)
+    pmac_trajectory_flyer = StandardFlyer(pmac_trajectory)
+
+    panda_hdf_info = TriggerInfo(
+        number_of_events=0,
+        trigger=DetectorTrigger.EXTERNAL_LEVEL,
+        livetime=duration - 1e-5,
+        deadtime=1e-5,
+    )
+
+    @attach_data_session_metadata_decorator()
+    @bpp.run_decorator()
+    @bpp.stage_decorator([p])
+    def inner_plan():
+        # Prepare pmac with the trajectory
+        yield from bps.prepare(pmac_trajectory_flyer, trigger_logic, wait=True)
+        yield from bps.prepare(p, panda_hdf_info, wait=True)
+
+        # kickoff devices waiting for all of them
+        yield from bps.kickoff(p, wait=True)
+        yield from bps.kickoff(pmac_trajectory_flyer, wait=True)
+
+        yield from bps.complete_all(pmac_trajectory_flyer, p, wait=True)
+
+    yield from inner_plan()
+
+
     panda_seq = StandardFlyer(StaticSeqTableTriggerLogic(p.seq[1]))
 
     # Prepare motor info using trajectory scanning
