@@ -79,11 +79,26 @@ def panda() -> HDFPanda:
         name="panda",
     )
 
+@device_factory()
+def panda2() -> HDFPanda:
+    return HDFPanda(
+        "BL51P-EA-PANDA-02:",
+        path_provider=get_path_provider(),
+        name="panda2",
+    )
+
+@device_factory()
+def panda1() -> HDFPanda:
+    return HDFPanda(
+        "BL51P-EA-PANDA-01:",
+        path_provider=get_path_provider(),
+        name="panda1",
+    )
 
 set_path_provider(
     StaticVisitPathProvider(
         BL,
-        Path("/dls/p51/data/2026/cm44254-1"),
+        Path("/dls/p51/data/2026/cm44254-2/tmp"),
         client=LocalDirectoryServiceClient(),
     )
 )
@@ -130,6 +145,122 @@ def no_panda(start: float,
         yield from bps.complete_all(pmac_trajectory_flyer, wait=True)
 
     yield from inner_plan()
+
+
+def panda_debug(
+    start: float,
+    stop: float,
+    num: int,
+    duration: float,
+    repetitions: int = 1,
+    ramp_time: float | None = None,
+    turnaround_time: float | None = None,
+):
+    p1 = panda1()
+    p2 = panda2()
+    motor_x = Motor(prefix="BL51P-OP-PCHRO-01:TS:XFINE", name="Motor_X")
+    pmac = PmacIO(
+        prefix="BL51P-MO-STEP-06:",
+        raw_motors=[motor_x],
+        coord_nums=[3],
+        name="pmac",
+    )
+    yield from ensure_connected(pmac, motor_x, p1, p2)
+
+    panda_seq = StandardFlyer(StaticSeqTableTriggerLogic(p2.seq[1]))
+
+    step = abs((stop - start) / num)
+
+    motor_x_mres = -0.0001
+
+    if repetitions < 2:
+        positions = np.arange(
+            start,
+            stop,
+            step,
+        )
+    else:
+        positions = np.append(
+        np.arange(
+            start,
+            stop,
+            step,),
+        np.arange(
+            stop,
+            start,
+            -1 * step)
+        )
+
+    # For simplicity sake I'll force the repetitions to be either 1 or an even number
+    if repetitions != 1 and (repetitions % 2) != 0:
+        repetitions = repetitions + 1
+
+    # Prepare motor info using trajectory scanning
+    spec = Fly(duration @ (repetitions * ~Line(motor_x, start, stop, num)))
+
+    info = PmacScanInfo(
+        spec=spec,
+        ramp_time=ramp_time,
+        turnaround_time=turnaround_time
+    )
+    pmac_trajectory = PmacTrajectoryTriggerLogic(pmac)
+    pmac_trajectory_flyer = StandardFlyer(pmac_trajectory)
+
+    panda_hdf_info = TriggerInfo(
+        number_of_events=0,
+        trigger=DetectorTrigger.EXTERNAL_LEVEL,
+        livetime=duration - 1e-5,
+        deadtime=1e-5,
+    )
+
+    table = SeqTable.empty()
+
+    positions = (positions / motor_x_mres).astype(int)
+
+    direction = [
+        SeqTrigger.POSA_GT if current < next else SeqTrigger.POSA_LT
+        for current, next in pairwise(positions)
+    ]
+    direction.append(direction[-1])
+
+    for pos, trig in zip(positions, direction, strict=True):
+
+        table += SeqTable.row(
+            repeats=1,
+            trigger=trig,
+            position=pos,
+            time1=int(duration / 1e-6) - 10,
+            outa1=True,
+            time2=10,
+            outa2=False,
+        )
+
+    seq_table_info = SeqTableInfo(sequence_table=table,
+                                  repeats=int(repetitions / 2),
+                                  prescale_as_us=1)
+
+    @attach_data_session_metadata_decorator()
+    @bpp.run_decorator()
+    @bpp.stage_decorator([p1, p2, panda_seq])
+    def inner_plan():
+        # Prepare pmac with the trajectory
+        yield from bps.prepare(pmac_trajectory_flyer, info, wait=True)
+        # prepare sequencer table
+        yield from bps.prepare(panda_seq, seq_table_info, wait=True)
+        # prepare panda and hdf writer once, at start of scan
+        yield from bps.prepare(p1, panda_hdf_info, wait=True)
+        yield from bps.prepare(p2, panda_hdf_info, wait=True)
+
+        # kickoff devices waiting for all of them
+        yield from bps.kickoff(p1, wait=True)
+        yield from bps.kickoff(p2, wait=True)
+        yield from bps.kickoff(panda_seq, wait=True)
+        yield from bps.kickoff(pmac_trajectory_flyer, wait=True)
+
+        yield from bps.complete_all(pmac_trajectory_flyer, p1, p2, panda_seq, wait=True)
+
+    yield from inner_plan()
+
 
 
 def panda_capture(
