@@ -80,7 +80,7 @@ def panda() -> HDFPanda:
     )
 
 @device_factory()
-def panda2() -> HDFPanda:
+def panda_encoder() -> HDFPanda:
     return HDFPanda(
         "BL51P-EA-PANDA-02:",
         path_provider=get_path_provider(),
@@ -88,7 +88,7 @@ def panda2() -> HDFPanda:
     )
 
 @device_factory()
-def panda1() -> HDFPanda:
+def panda_fast() -> HDFPanda:
     return HDFPanda(
         "BL51P-EA-PANDA-01:",
         path_provider=get_path_provider(),
@@ -156,8 +156,8 @@ def panda_debug(
     ramp_time: float | None = None,
     turnaround_time: float | None = None,
 ):
-    p1 = panda1()
-    p2 = panda2()
+    p1 = panda_fast()
+    p2 = panda_encoder()
     motor_x = Motor(prefix="BL51P-OP-PCHRO-01:TS:XFINE", name="Motor_X")
     pmac = PmacIO(
         prefix="BL51P-MO-STEP-06:",
@@ -176,7 +176,7 @@ def panda_debug(
     if repetitions < 2:
         positions = np.arange(
             start,
-            stop,
+            stop + 0.5 * step,
             step,
         )
     else:
@@ -187,7 +187,7 @@ def panda_debug(
             step,),
         np.arange(
             stop,
-            start,
+            start + 0.5 * step,
             -1 * step)
         )
 
@@ -215,7 +215,17 @@ def panda_debug(
 
     table = SeqTable.empty()
 
-    positions = (positions / motor_x_mres).astype(int)
+    positions = np.ndarray(2 * num)
+
+    # positions = (positions / motor_x_mres).astype(int)
+    tmp = [(x / motor_x_mres).astype(int)
+                 for x in spec.frames().lower[motor_x]]
+    positions[0:num] = tmp[0:num]
+    tmp = [(x / motor_x_mres).astype(int)
+        for x in spec.frames().upper[motor_x]]
+    positions[num:2 * num] = tmp[num - 1:(2 * num) - 1]
+
+    print(f"positions = {positions}")
 
     direction = [
         SeqTrigger.POSA_GT if current < next else SeqTrigger.POSA_LT
@@ -223,17 +233,47 @@ def panda_debug(
     ]
     direction.append(direction[-1])
 
+    counter = 0
     for pos, trig in zip(positions, direction, strict=True):
+        counter += 1
+        if counter - 1 == 0:
+            # int(duration / 1e-6) - 1,
+            table += SeqTable.row(
+                repeats=1,
+                trigger=trig,
+                position=pos,
+                time1=int(duration / 1e-6) - 1,
+                outa1=True,
+                outb1=True,
+                time2=1,
+                outa2=False,
+                outb2=False
+            )
 
-        table += SeqTable.row(
-            repeats=1,
-            trigger=trig,
-            position=pos,
-            time1=int(duration / 1e-6) - 10,
-            outa1=True,
-            time2=10,
-            outa2=False,
-        )
+        elif counter == num:
+            table += SeqTable.row(
+                repeats=1,
+                trigger=trig,
+                position=pos,
+                time1=int(duration / 1e-6) - 1,
+                outa1=True,
+                outb1=True,
+                time2=1,
+                outa2=False,
+                outb2=False
+            )
+            counter = 0
+
+        else:
+            table += SeqTable.row(
+                repeats=1,
+                trigger=trig,
+                position=pos,
+                time1=int(duration / 1e-6) - 1,
+                outa1=True,
+                time2=1,
+                outa2=False,
+            )
 
     seq_table_info = SeqTableInfo(sequence_table=table,
                                   repeats=int(repetitions / 2),
@@ -245,10 +285,11 @@ def panda_debug(
     def inner_plan():
         # Prepare pmac with the trajectory
         yield from bps.prepare(pmac_trajectory_flyer, info, wait=True)
+
         # prepare sequencer table
         yield from bps.prepare(panda_seq, seq_table_info, wait=True)
         # prepare panda and hdf writer once, at start of scan
-        yield from bps.prepare(p1, panda_hdf_info, wait=True)
+        yield from bps.prepare(p1, panda_hdf_info)
         yield from bps.prepare(p2, panda_hdf_info, wait=True)
 
         # kickoff devices waiting for all of them
@@ -257,7 +298,7 @@ def panda_debug(
         yield from bps.kickoff(panda_seq, wait=True)
         yield from bps.kickoff(pmac_trajectory_flyer, wait=True)
 
-        yield from bps.complete_all(pmac_trajectory_flyer, p1, p2, panda_seq, wait=True)
+        yield from bps.complete_all(pmac_trajectory_flyer, panda_seq, wait=True)
 
     yield from inner_plan()
 
@@ -341,9 +382,9 @@ def panda_scan(start: float,
     motor_x_mres = -0.0001
     positions = np.append(np.arange(
         start,
-        stop + step,
+        stop,
         step,
-    ), (np.arange(stop, start - step, -1 * step)))
+    ), (np.arange(stop, start, -1 * step)))
 
     # Prepare motor info using trajectory scanning
     spec = Fly(
@@ -377,19 +418,21 @@ def panda_scan(start: float,
             repeats=1,
             trigger=trig,
             position=pos,
-            time1=int(acq_duration / 1e-6) - 1,
+            time1=int(duration / 1e-6) - 1,
             outa1=True,
             time2=1,
             outa2=False,
         )
 
-    seq_table_info = SeqTableInfo(sequence_table=table, repeats=int(repetitions / 2), prescale_as_us=1)
+    seq_table_info = SeqTableInfo(sequence_table=table,
+                                  repeats=int(repetitions / 2),
+                                  prescale_as_us=1)
 
     # Prepare Panda file writer trigger info
     panda_hdf_info = TriggerInfo(
-        number_of_events=(int(repetitions / 2) * len(positions)),
+        number_of_events=0,
         trigger=DetectorTrigger.EXTERNAL_LEVEL,
-        livetime=acq_duration - 1e-5,
+        livetime=duration - 1e-5,
         deadtime=1e-5,
     )
 
