@@ -15,7 +15,7 @@ description = "Bluesky plans and scripts"
 dependencies = [
     "bluesky",
     "ophyd",
-    "ophyd_async @ git+https://git@github.com/bluesky/ophyd-async.git@config-ramp",
+    "ophyd_async @ git+https://git@github.com/bluesky/ophyd-async.git@xspress-odin-dev",
     "pandas",
     "matplotlib",
     "databroker",

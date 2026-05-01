@@ -41,7 +41,7 @@ from ophyd_async.fastcs.panda import (
 )
 from ophyd_async.fastcs.panda._block import PcompBlock
 from ophyd_async.plan_stubs import ensure_connected
-
+from ophyd_async.fastcs.xspress import XspressDetector, XspressTriggerInfo
 # get_beamline_name with no arguments to get the
 # default BL name (from $BEAMLINE)
 BL = get_beamline_name("P51")
@@ -81,6 +81,7 @@ def panda() -> HDFPanda:
 
 @device_factory()
 def panda_encoder() -> HDFPanda:
+    """Main PandA with the motor encoders."""
     return HDFPanda(
         "BL51P-EA-PANDA-02:",
         path_provider=get_path_provider(),
@@ -89,10 +90,20 @@ def panda_encoder() -> HDFPanda:
 
 @device_factory()
 def panda_fast() -> HDFPanda:
+    """Second PandA without FMC card."""
     return HDFPanda(
         "BL51P-EA-PANDA-01:",
         path_provider=get_path_provider(),
         name="panda1",
+    )
+
+
+def xsp() -> XspressDetector:
+    """Xspress detector simulation."""
+    return XspressDetector(
+        prefix="BL51P-EA-XSP-01:",
+        path_provider=get_path_provider(),
+        name="xspress",
     )
 
 set_path_provider(
@@ -453,6 +464,117 @@ def panda_scan(start: float,
         yield from bps.kickoff(pmac_trajectory_flyer, wait=True)
 
         yield from bps.complete_all(pmac_trajectory_flyer, p, panda_seq, wait=True)
+
+    yield from inner_plan()
+
+
+def xsp_sim_scan(start: float,
+               stop: float,
+               num: int,
+               duration: float,
+               repetitions: int = 1,
+               ramp_time: float | None = None,
+               turnaround_time: float | None = None
+    ):
+    p = panda()
+    det = xsp()
+    motor_x = Motor(prefix="BL51P-OP-PCHRO-01:TS:XFINE", name="Motor_X")
+    pmac = PmacIO(
+        prefix="BL51P-MO-STEP-06:",
+        raw_motors=[motor_x],
+        coord_nums=[3],
+        name="pmac",
+    )
+    yield from ensure_connected(pmac, motor_x, p, det)
+    panda_seq = StandardFlyer(StaticSeqTableTriggerLogic(p.seq[1]))
+
+    motor_x_mres = -0.0001
+
+    # Prepare motor info using trajectory scanning
+    spec = Fly(
+        float(duration)
+        @ (repetitions * ~Line(motor_x, start, stop, num))
+    )
+
+    info = PmacScanInfo(
+        spec=spec,
+        ramp_time=ramp_time,
+        turnaround_time=turnaround_time
+    )
+
+    pmac_trajectory = PmacTrajectoryTriggerLogic(pmac)
+    pmac_trajectory_flyer = StandardFlyer(pmac_trajectory)
+
+    table = SeqTable.empty()
+
+    positions = np.ndarray(2 * num)
+
+    # positions = (positions / motor_x_mres).astype(int)
+    tmp = [(x / motor_x_mres).astype(int)
+                 for x in spec.frames().lower[motor_x]]
+    positions[0:num] = tmp[0:num]
+    tmp = [(x / motor_x_mres).astype(int)
+        for x in spec.frames().upper[motor_x]]
+    positions[num:2 * num] = tmp[num - 1:(2 * num) - 1]
+
+    direction = [
+        SeqTrigger.POSA_GT if current < next else SeqTrigger.POSA_LT
+        for current, next in pairwise(positions)
+    ]
+    direction.append(direction[-1])
+    acq_duration = (num * duration) / (num + 1)
+    print(f"acq_duration = {acq_duration}")
+    for pos, trig in zip(positions, direction, strict=True):
+
+        table += SeqTable.row(
+            repeats=1,
+            trigger=trig,
+            position=pos,
+            time1=int(duration / 1e-6) - 1,
+            outa1=True,
+            time2=1,
+            outa2=False,
+        )
+
+    seq_table_info = SeqTableInfo(sequence_table=table,
+                                  repeats=int(repetitions / 2),
+                                  prescale_as_us=1)
+
+    # Prepare Panda file writer trigger info
+    panda_hdf_info = TriggerInfo(
+        number_of_events=0,
+        trigger=DetectorTrigger.EXTERNAL_LEVEL,
+        livetime=duration - 1e-5,
+        deadtime=1e-5,
+    )
+
+    xsp_trigger = XspressTriggerInfo(
+        number_of_events=int(num * repetitions),
+        trigger=DetectorTrigger.INTERNAL,
+        livetime=duration,
+        chunk=int(1 / duration),
+    )
+
+    @attach_data_session_metadata_decorator()
+    @bpp.run_decorator()
+    @bpp.stage_decorator([p, panda_seq, det])
+    def inner_plan():
+        # Prepare pmac with the trajectory
+        yield from bps.prepare(pmac_trajectory_flyer, info, wait=True)
+        # prepare sequencer table
+        yield from bps.prepare(panda_seq, seq_table_info, wait=True)
+        # prepare panda and hdf writer once, at start of scan
+        yield from bps.prepare(p, panda_hdf_info, wait=True)
+        # prepare xsp sim hdf writer
+        yield from bps.prepare(det, xsp_trigger, wait=True)
+
+        # kickoff devices waiting for all of them
+        yield from bps.kickoff(p, wait=True)
+        yield from bps.kickoff(panda_seq, wait=True)
+        yield from bps.kickoff(det, wait=True)
+        yield from bps.kickoff(pmac_trajectory_flyer, wait=True)
+
+        yield from bps.complete_all(pmac_trajectory_flyer, p, panda_seq, det, wait=True)
 
     yield from inner_plan()
 
